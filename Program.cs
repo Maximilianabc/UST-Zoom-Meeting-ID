@@ -1,18 +1,24 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
 using System.Text;
 using System.Text.Json;
-using System.Threading.Tasks;
 using System.Text.RegularExpressions;
 using System.Web;
-using System.Windows.Forms;
+using System.Linq.Expressions;
+using System.Runtime.CompilerServices;
 
 namespace UST_Zoom_Meeting_ID
 {
+    public class Settings
+    {
+        public string Username { get; set; }
+        public string Password { get; set; }
+        public string Default_Path { get; set; }
+        public string Favourite_Path { get; set; }
+    }
     public class Major
     {
         public string Abbr { get; set; }
@@ -28,99 +34,149 @@ namespace UST_Zoom_Meeting_ID
     }
     class Program
     {
-        static List<Major> majors = new List<Major>();
-        static string defaultpath = $@"{Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData)}\UST Zoom Meeting ID\Zoom ID.json";
+        static string folder = $@"{Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData)}\UST Zoom Meeting ID\";
+        static string configpath = $"{folder}Config.json";
 
-        enum HelpType { Main, Fetch, Load, Find, Join }
+        static Settings settings = new Settings() { Default_Path = $"{folder}Zoom ID.json" };
+        static List<Major> majors = new List<Major>();
+        static List<Major> favlist = new List<Major>();
+
+        enum HelpType { Main, Fetch, Find, Mine, Config }
         static List<string> mainhelp => new List<string>()
         {
-            "\t{fetch | load} [<PATH>]",
+            "\tfetch [<PATH>]",
             "\tfind <COURSE-DETAILS>...",
-            "\tjoin <COURSE-DETAILS>...",
+            "\tconfig <CONFIG-OPTIONS>...",
             "\t[<COMMAND-NAME>] (-h | --help)"
         };
         static List<string> fetchhelp => new List<string>()
         {
-            "\t\"fetch\" [<path>]"
-        };
-        static List<string> loadhelp => new List<string>()
-        {
-            "\t\"load\" [<path>]"
+            "\t\"fetch\" [<path>] [-s | --save-password]"
         };
         static List<string> findhelp => new List<string>()
         {
-            "\t\"find\" {-a | <course-details>...} [-x <column>...]",
+            "\t\"find\" {-a | <course-details>...} [<display-options> <columns>...]",
         };
-        static List<string> joinhelp => new List<string>()
+        static List<string> minehelp => new List<string>()
         {
-            "\t\"join\" <link>",
+            "\t\"mine\" join <course-details>...",
+            "\t\"mine\" {add | remove} <course-details>...",
+        };
+        static List<string> confighelp => new List<string>()
+        {
+            "\t\"config\" [-u=<username>] [-p=<password>] [-d=<default-path>]"
         };
 
-        static List<(string cmd, string desc)> options => new List<(string, string)>()
+        static List<ITuple> options => new List<ITuple>()
         {
             ("fetch", "Fetch IDs from the website and save the result to local json file."),
-            ("load","Load IDs from local json file."),
             ("find","Find course(s) with query parameters provided."),
-            ("join","Join the zoom meeting with course details provided."),
             ("-h, --help","Provide help information for this tool.")
         };
-        static List<(string cmd, string desc)> fetchopts => new List<(string, string)>()
+        static List<ITuple> fetchopts => new List<ITuple>()
         {
-            ("path","Specify the path for storing the data fetched/loading data. [Default: %AppData%/UST Zoom Meeting ID/Zoom ID.json]"),
+            ("path","Specify the path for storing the data fetched/loading data. [Default: the path specified in %AppData%/UST Zoom Meeting ID/Config.json]"),
             ("-h, --help","Provide help information for this command."),
         };
-        static List<(string cmd, string desc)> queryopts => new List<(string, string)>()
+        static List<ITuple> queryopts => new List<ITuple>()
         {
             ("-a, --all", "List all courses. Cannot be used with other course details."),
-            ("-m <MAJOR>, --major <MAJOR>", "Specifies the major."),
-            ("-c <CODE>, --code <CODE>", "Specifies the course code."),
-            ("-n <NAME>, --name <NAME>","Specifies the course name."),
-            ("-t <TIME>, --time <TIME>","Specifies the starting time, in the format wwwwhhmm. e.g. -t 01031300 for Mon Wed 13:00"),
-            ("-z <ID>, --zoom-id <ID>","Specifies the zoom ID, which is either 9 or 10 digits."),
-            ("-l <LINK>, --link <LINK>","Specifies the link."),
-            ("-x <COLUMN>..., --hide <COLUMN>...", "Skip displaying course detail columns by specifying their shorthands, e.g. -x nl for skip displaying course names and links. Not a course detail, can be used with -a."),
+            ("Coures Details:",""),
+            ("-m=<MAJOR>, --major=<MAJOR>", "Specifies the major."),
+            ("-c=<CODE>, --code=<CODE>", "Specifies the course code. The major abbreviation can be skipped if -m is used. e.g. -m=COMP -c=2011"),
+            ("-n=<NAME>, --name=<NAME>","Specifies the course name. Use quotation marks if spaces are present in the name."),
+            ("-t=<TIME>, --time=<TIME>","Specifies the starting time, in the format ww[ww]hhmm. e.g. -t=01031300 for Mon Wed 13:00, -t=021430 for Tue 14:30"),
+            ("-z=<ID>, --zoom-id=<ID>","Specifies the zoom ID, which is either 9 or 10 digits."),
+            ("-l=<LINK>, --link=<LINK>","Specifies the link."),
+            ("Display Options:",""),
+            ("-x=<COLUMN>..., --hide=<COLUMN>...", "Skip displaying course detail columns by specifying their shorthands, e.g. -x=nl for skip displaying course names and links."),
+            ("-s=<COLUMN>..., --sort=<COLUMN>...", "Sort course detail columns by specifying their shorthands, e.g. -s=cn for sorting courses by codes then by names."),
+            ("Operators:",""),
+            ("*","Wildcard. e.g. -m=C*** returns all courses of which major names start with C"),
+            ("?","Null coalesce. e.g. -c=COMP1***? returns all courses of which course codes start with COMP1, with or without the last alphabet."),
+            ("~","Approxiamte match. e.g. -n=~Lab returns all courses with names contain \"Lab\""),
+            ("\"","Grouping characters. e.g. -n=\"ACCT2010 - L07\""),
+            ("&","And. e.g. -n=~\"Lab\"&~\"Programming\" returns all courses contain \"Lab\" and \"Programming\""),
+            ("|","Or. e.g. -m=\"COMP\"|\"MATH\" returns all COMP and MATH courses."),
+            ("!","Not. e.g. -n=!~Calculus returns all courses of which names do not contain \"Calculus\"."),
             ("-h, --help","Provide help information for this command.")
         };
-        static List<(string cmd, string desc)> joinopts => new List<(string, string)>()
+        static List<ITuple> mineopts => new List<ITuple>()
         {
-            ("link","Specify the link for the zoom meeting to be joined."),
+            ("add","Add courses to favourite list with course details provided."),
+            ("remove","Remove courses from favourite list with course details provided."),
+            ("join","Join the zoom meeting on the favourite list with course details provided."),
             ("-h, --help","Provide help information for this command."),
         };
+        static List<ITuple> configopts => new List<ITuple>()
+        {
+            ("save", "Save the corresponding configs"),
+            ("remove", "Remove the corresponding configs"),
+            ("-u, --username", "ITSC username."),
+            ("-p, --password", "ITSC password."),
+            ("-d, --default-path", "Default path for saving/loading results fetched."),
+        };
+
+        static List<int> widths => new List<int>() { 15, 15, 15, 15, 15 };
+        static List<int> maxlengths => new List<int>() { 20, 20, 20, 20, 20 };
 
         static void Main(string[] args)
         {
-            Action a = (Action)(args[0] switch
+            ReadConfig();
+            ReadLocal();
+            Action a = () =>
             {
-                "fetch" => () => { Fetch(args.Length > 1 ? args[1] : ""); },
-                "load" => () => { ReadLocal(args.Length > 1 ? args[1] : ""); },
-                "find" => () =>
+                if (args.Length == 0)
                 {
-                    if (args.Length < 2)
+                    Help();
+                }
+                else
+                {
+                    ((Action)(args[0] switch
                     {
-                        Help(HelpType.Find);
-                    }
-                    else
-                    {
-                        Query(args[1]);
-                    }
-                },
-                _ => () => { Help(); }
-            });
-            if (args.Length == 0) 
-            { 
-                Help(); 
-            }
-            else
-            {
-                a();
-            }
-            string line = Console.ReadLine();
-            while (line != "exit")
+                        "fetch" => () => { Fetch(args.Length >= 2 ? args[1] : ""); },
+                        "find" => () =>
+                        {
+                            if (args.Length < 2)
+                            {
+                                Help(HelpType.Find);
+                            }
+                            else
+                            {
+                                Query(args.Skip(1).ToArray());
+                            }
+                        },
+                        "mine" => () =>
+                        {
+                            if (args.Length < 2)
+                            {
+                                Help(HelpType.Mine);
+                            }
+                            else
+                            {
+                                Mine(args.Skip(1).ToArray());
+                            }
+                        },
+                        "config" => () =>
+                        {
+                            if (args.Length < 2)
+                            {
+                                Help(HelpType.Config);  
+                            }
+                            else
+                            {
+                                EditConfig(args.Skip(1).ToArray());
+                            }
+                        },
+                        _ => () => { Help(); }
+                    }))();
+                }
+            };
+            for (string line; (line = Console.ReadLine()) != "exit";)
             {
                 args = line.Split(new char[] { ' ' });
                 a();
                 Console.WriteLine("Type 'exit' to quit.");
-                line = Console.ReadLine();
             }
         }
 
@@ -163,50 +219,38 @@ namespace UST_Zoom_Meeting_ID
             }
             return ress;
         }
-        static void Help(HelpType help = HelpType.Main)
-        {
-            List<string> helps = help switch
-            {
-                HelpType.Main => mainhelp,
-                HelpType.Fetch => fetchhelp,
-                HelpType.Load => loadhelp,
-                HelpType.Find => findhelp,
-                HelpType.Join => joinhelp,
-                _ => throw new NotImplementedException()
-            };
-            DescHelp(helps);
-            Console.WriteLine();
 
-            List<(string, string)> opts = help switch
-            {
-                HelpType.Main => options,
-                HelpType.Fetch => fetchopts,
-                HelpType.Load => fetchopts,
-                HelpType.Find => queryopts,
-                HelpType.Join => joinopts,
-                _ => throw new NotImplementedException()
-            };
-            PadHelp(opts);
-        }
         static void Fetch(string path = "")
         {
-            Stopwatch w = new Stopwatch();
-            w.Start();
-
             string baseURL = "https://itscapps.ust.hk/zoom/upcoming.php";
             string redirect = SendRequest(baseURL);
 
+            int count = 0;
             while (redirect.Contains("formsAuthenticationArea")) // CAS login
             {
+                if (count >= 1)
+                {
+                    Console.WriteLine("Login failed. Please check your credentials.");
+                    return;
+                }
+                string Username = settings.Username;
+                string pw = settings.Password;
                 Console.WriteLine("Login required.");
-                Console.WriteLine("Please provide your ITSC account name:");
-                string Username = Console.ReadLine();
-                Console.WriteLine("Please provide your password:");
-                string pw = Console.ReadLine();
+                if (string.IsNullOrEmpty(Username))
+                {
+                    Console.WriteLine("Please provide your ITSC account name:");
+                    Username = Console.ReadLine();
+                }
+                if (string.IsNullOrEmpty(pw))
+                {
+                    Console.WriteLine("Please provide your password:");
+                    pw = Console.ReadLine();
+                }
                 string exec = Regex.Match(redirect, @"execution"" value=""([\w-=]+)").Groups[1].Value;
                 redirect = POSTRequest(
                     "https://cas.ust.hk/cas/login?service=https%3A%2F%2Fitscapps.ust.hk%2Fzoom%2Fupcoming.php",
                     $"execution={HttpUtility.UrlEncode(exec)}&_eventId=submit&geolocation=&username={HttpUtility.UrlEncode(Username)}&password={HttpUtility.UrlEncode(pw)}");
+                count++;
             }
 
             MatchCollection mc = Regex.Matches(redirect, @"<tr>\s+<td>(([A-Z]{4})[0-9A-Z]+)<\/td>\s+<td>(?:(\d+-\d+-\d+\s\d+:\d+)|(Webinar))<\/td>\s+<td>(.*?)<\/td>\s+<td nowrap>(\d+)<\/td>\s+<td><a href=""([\w:\/.?=]+)", RegexOptions.Singleline);
@@ -240,14 +284,22 @@ namespace UST_Zoom_Meeting_ID
                 }
                 else
                 {
-                    maj.Courses.Add(new Course()
+                    Course c = maj.Courses.Find(cc => cc.Code == code && cc.Name == name && cc.ZoomID == id && cc.Link == link);
+                    if (c != null)
                     {
-                        Code = code,
-                        Time = time,
-                        Name = name,
-                        ZoomID = id,
-                        Link = link
-                    });
+                        c.Time += $"\r\n{time}";
+                    }
+                    else
+                    {
+                        maj.Courses.Add(new Course()
+                        {
+                            Code = code,
+                            Time = time,
+                            Name = name,
+                            ZoomID = id,
+                            Link = link
+                        });
+                    }
                 }
             }
             foreach (Major maj in majors)
@@ -257,27 +309,35 @@ namespace UST_Zoom_Meeting_ID
             majors = majors.OrderBy(m => m.Abbr).ToList();
 
             string Json = JsonSerializer.Serialize(majors, new JsonSerializerOptions() { WriteIndented = true });
+            if (string.IsNullOrEmpty(path))
+            {
+                path = settings.Default_Path;
+                if (!Directory.Exists(Path.GetDirectoryName(settings.Default_Path)))
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(settings.Default_Path));
+                }
+            }        
             File.WriteAllText(path, Json);
-            w.Stop();
-
-            Console.WriteLine($"Fetched sucessfully in {Math.Round(w.ElapsedMilliseconds / 1000D, 3)} second(s). The result is located at {path}.");
+            Console.WriteLine($"Fetched sucessfully. The result is located at {path}.");
         }
-        static void Query(string q)
+        static void Query(string[] args)
+        {
+            
+        }
+        static void Mine(string[] args)
         {
 
         }
-        static void Join()
-        {
 
-        }
         static void ReadLocal(string path = "")
         {
             try
             {
-                if (path == "") path = defaultpath;
+                if (string.IsNullOrEmpty(path)) path = settings.Default_Path;
                 majors = JsonSerializer.Deserialize<List<Major>>(File.ReadAllText(path));
+                Console.WriteLine($"{majors.Count} majors loaded.");
             }
-            catch (FileNotFoundException)
+            catch (Exception e) when (e is FileNotFoundException || e is DirectoryNotFoundException)
             {
                 string option = "";
                 while (option != "Y" || option != "N")
@@ -286,23 +346,92 @@ namespace UST_Zoom_Meeting_ID
                     option = Console.ReadLine();
                     if (option == "Y")
                     {
-                        OpenFileDialog d = new OpenFileDialog() { Filter = "JSON files (*.json)"};
-                        d.ShowDialog();
+                        Console.WriteLine("Please enter the path of the json file");
+                        path = Console.ReadLine();
                         try
                         {
-                            majors = JsonSerializer.Deserialize<List<Major>>(File.ReadAllText(d.FileName));
+                            majors = JsonSerializer.Deserialize<List<Major>>(File.ReadAllText(path));
                         }
                         catch
                         {
                             Console.WriteLine("Unknown error occurred.");
                         }
                     }
-                }            
+                }
             }
             catch
             {
                 Console.WriteLine("Unknown error occurred.");
             }
+        }
+        static void ReadConfig()
+        {
+            if (!Directory.Exists(folder))
+            { 
+                Directory.CreateDirectory(folder);               
+            }
+            else
+            {
+                if (!File.Exists(configpath))
+                {
+                    File.WriteAllText(configpath, JsonSerializer.Serialize(settings, new JsonSerializerOptions() { WriteIndented = true }));
+                }
+                else
+                {
+                    settings = JsonSerializer.Deserialize<Settings>(File.ReadAllText(configpath));
+                }
+            }
+        }
+        static void EditConfig(string[] args)
+        {
+            foreach (string arg in args)
+            {
+                string opt = arg.Split(new char[] { '=' })[0];
+                string subarg = arg.Split(new char[] { '=' })[1];
+                switch (opt)
+                {
+                    case "-u":
+                        settings.Username = subarg;
+                        break;
+                    case "-p":
+                        settings.Password = subarg;
+                        break;
+                    case "-d":
+                        settings.Default_Path = subarg;
+                        break;
+                    default:
+                        Help(HelpType.Config);
+                        return;
+                };
+            }
+            File.WriteAllText(configpath, JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true }));
+            Console.WriteLine("Config saved.");
+        }
+
+        static void Help(HelpType help = HelpType.Main)
+        {
+            List<string> helps = help switch
+            {
+                HelpType.Main => mainhelp,
+                HelpType.Fetch => fetchhelp,
+                HelpType.Find => findhelp,
+                HelpType.Mine => minehelp,
+                HelpType.Config => confighelp,
+                _ => throw new NotImplementedException()
+            };
+            DescHelp(helps);
+            Console.WriteLine();
+
+            List <ITuple> opts = help switch
+            {
+                HelpType.Main => options,
+                HelpType.Fetch => fetchopts,
+                HelpType.Find => queryopts,
+                HelpType.Mine => mineopts,
+                HelpType.Config => configopts,
+                _ => throw new NotImplementedException()
+            };
+            PadTable(opts, new List<int>() { 50,50 }, new List<int>() { 50,50 });
         }
         static void DescHelp(List<string> helps)
         {
@@ -313,39 +442,66 @@ namespace UST_Zoom_Meeting_ID
             }
             Console.WriteLine();
         }
-        static void PadHelp(List<(string,string)> options, int pad = 20, int maxlength = 50)
+        static void PadTable(List<ITuple> table, List<int> pads, List<int> maxlengths)
         {
-            foreach ((string cmd, string desc) opt in options)
+            int numelement = table.First().Length;
+            if (pads.Count != numelement || maxlengths.Count != numelement) throw new ArgumentException();
+
+            List<List<List<string>>> formattedtable = new List<List<List<string>>>();
+            for (int i = 0; i < table.Count; i++)
             {
-                if (opt.desc.Length > maxlength)
+                List<List<string>> formattedrow = new List<List<string>>(numelement);
+                for (int j = 0; j < numelement; j++)
                 {
-                    int lastspace = 0;
-                    while (lastspace < opt.desc.Length)
-                    {
-                        int oldlast = lastspace;
-                        if (oldlast + maxlength > opt.desc.Length)
-                        {
-                            Console.WriteLine($"{new string(' ', pad)}{opt.desc.Substring(oldlast)}");
-                            break;
-                        }
-                        else
-                        {
-                            lastspace = Regex.Matches(opt.desc, @"\s").Cast<Match>().Select(m => m.Index).Where(ind => ind <= lastspace + maxlength).Max();
-                            string firstcol = oldlast == 0 ? $"{opt.cmd.PadRight(pad)}" : new string(' ', pad);
-                            Console.WriteLine($"{firstcol}{opt.desc.Substring(oldlast, lastspace - oldlast)}");
-                            lastspace++;
-                        }
-                    }
+                    formattedrow.Add(PadCell(table[i][j].ToString(), pads[j], maxlengths[j]));
                 }
-                else
+                int maxrows = formattedrow.Select(r => r.Count).Max();
+                int colindex = 0;
+                foreach(List<string> contentrow in formattedrow)
                 {
-                    Console.WriteLine($"{opt.cmd.PadRight(pad)}{opt.desc}");
+                    if (contentrow.Count < maxrows)
+                    {
+                        contentrow.AddRange(Enumerable.Range(0, maxrows - contentrow.Count + 1).Select(index => new string(' ', pads[colindex])));
+                    }
+                    colindex++;
+                }
+                for (int k = 0; k < maxrows; k++)
+                {
+                    for (int l = 0; l < numelement; l++)
+                    {
+                        Console.Write(formattedrow[l][k]);
+                    }
+                    Console.Write(Environment.NewLine);
                 }
             }
         }
-        static void PadTable(int[] pads, int[] maxlengths)
+        static List<string> PadCell(string cellcontent, int pad, int maxlength)
         {
-
+            List<string> rows = new List<string>();
+            if (cellcontent.Length > maxlength)
+            {
+                int lastspace = 0;
+                while (lastspace < cellcontent.Length)
+                {
+                    int oldlast = lastspace;
+                    if (oldlast + maxlength > cellcontent.Length)
+                    {
+                        rows.Add(cellcontent.Substring(oldlast).PadRight(pad));
+                        break;
+                    }
+                    else
+                    {
+                        lastspace = Regex.Matches(cellcontent, @"\s").Cast<Match>().Select(m => m.Index).Where(ind => ind <= oldlast + maxlength).Max();
+                        rows.Add(cellcontent.Substring(oldlast, lastspace - oldlast).PadRight(pad));
+                        lastspace++;
+                    }
+                }
+            }
+            else
+            {
+                rows.Add(cellcontent.PadRight(pad));
+            }
+            return rows;
         }
     }
 }
